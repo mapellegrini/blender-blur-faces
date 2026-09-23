@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Face Blur Workflow",
     "author": "OpenAI",
-    "version": (0, 3, 1),
+    "version": (0, 3, 3),
     "blender": (5, 2, 0),
     "location": "Movie Clip Editor > Sidebar > Face Blur",
-    "description": "Reusable face-blur workflow with optional tracking and source-audio preservation for Blender 5.2",
+    "description": "Reusable face-blur workflow with optional tracking and source-audio preservation and source frame-rate matching for Blender 5.2",
     "category": "Movie Clip",
 }
 
@@ -360,6 +360,62 @@ def _set_default_output(scene, clip):
     )
 
 
+
+
+def _fps_ratio_from_clip_fps(fps_value):
+    """Return a Blender-friendly (fps, fps_base) pair for a clip fps.
+
+    Uses exact NTSC-style ratios for common fractional rates, otherwise falls
+    back to a millisecond precision rational.
+    """
+    fps_value = float(fps_value)
+    if fps_value <= 0:
+        raise RuntimeError("Clip frame rate is not available")
+
+    common = [
+        (23.976023976, 24000, 1001),
+        (29.97002997, 30000, 1001),
+        (59.94005994, 60000, 1001),
+        (119.88011988, 120000, 1001),
+        (24.0, 24, 1),
+        (25.0, 25, 1),
+        (30.0, 30, 1),
+        (48.0, 48, 1),
+        (50.0, 50, 1),
+        (60.0, 60, 1),
+        (120.0, 120, 1),
+    ]
+    for target, fps, fps_base in common:
+        if abs(fps_value - target) < 0.01:
+            return fps, fps_base
+
+    fps = max(1, int(round(fps_value * 1000.0)))
+    fps_base = 1000
+    return fps, fps_base
+
+
+def _scene_effective_fps(scene):
+    fps = float(scene.render.fps)
+    fps_base = float(scene.render.fps_base) if scene.render.fps_base else 1.0
+    if fps_base == 0:
+        fps_base = 1.0
+    return fps / fps_base
+
+
+def _sync_scene_fps_to_clip(scene, clip):
+    if clip.fps <= 0:
+        raise RuntimeError("Clip frame rate is not available")
+
+    fps, fps_base = _fps_ratio_from_clip_fps(clip.fps)
+    scene.render.fps = fps
+    scene.render.fps_base = fps_base
+    return _scene_effective_fps(scene)
+
+
+def _scene_fps_matches_clip(scene, clip, tolerance=0.0005):
+    if clip.fps <= 0:
+        return False
+    return abs(_scene_effective_fps(scene) - float(clip.fps)) <= tolerance
 
 
 def _apply_blur_radius(scene):
@@ -1154,10 +1210,7 @@ class FACEBLUR_OT_match_geometry(bpy.types.Operator):
         scene.render.pixel_aspect_y = 1.0
 
         if clip.fps > 0:
-            # Blender represents rates such as 29.97 as 30 / 1.001...
-            nominal = max(1, int(round(clip.fps)))
-            scene.render.fps = nominal
-            scene.render.fps_base = nominal / float(clip.fps)
+            _sync_scene_fps_to_clip(scene, clip)
 
         clip.frame_start = 1
         scene.frame_start = 1
@@ -1211,6 +1264,18 @@ class FACEBLUR_OT_render_animation(bpy.types.Operator):
                 f"clip is {w}x{h}. Click Match Geometry to Clip first."
             )
             return {'CANCELLED'}
+
+        if clip.fps <= 0:
+            self.report({'ERROR'}, "Clip frame rate is not available. Reload the clip or click Match Geometry to Clip.")
+            return {'CANCELLED'}
+
+        if not _scene_fps_matches_clip(scene, clip):
+            try:
+                matched_fps = _sync_scene_fps_to_clip(scene, clip)
+            except Exception as exc:
+                self.report({'ERROR'}, "Frame-rate setup failed: " + str(exc))
+                return {'CANCELLED'}
+            self.report({'INFO'}, f"Render frame rate auto-corrected to {matched_fps:.3f} fps to match the source clip")
 
         try:
             if scene.face_blur_preserve_audio:
@@ -1328,11 +1393,16 @@ class FACEBLUR_PT_panel(bpy.types.Panel):
             icon='SPEAKER' if scene.face_blur_preserve_audio else 'MUTE_IPO_OFF',
         )
 
+        output_box = layout.box()
+        output_box.label(text="Final Output Path", icon='FILE_MOVIE')
+        output_path = bpy.path.abspath(scene.render.filepath) if scene.render.filepath else "Not set"
+        output_box.label(text=output_path)
+
         layout.operator("face_blur.match_geometry", icon='FULLSCREEN_ENTER')
 
         if clip and clip.size[0] and clip.size[1]:
             w, h = clip.size
-            ok = (
+            geom_ok = (
                 scene.render.resolution_x == w
                 and scene.render.resolution_y == h
                 and scene.render.resolution_percentage == 100
@@ -1343,7 +1413,17 @@ class FACEBLUR_PT_panel(bpy.types.Panel):
                     f"Geometry: {scene.render.resolution_x} x "
                     f"{scene.render.resolution_y} @ {scene.render.resolution_percentage}%"
                 ),
-                icon='CHECKMARK' if ok else 'ERROR',
+                icon='CHECKMARK' if geom_ok else 'ERROR',
+            )
+
+            fps_ok = _scene_fps_matches_clip(scene, clip)
+            row = layout.row()
+            row.label(
+                text=(
+                    f"Frame rate: {_scene_effective_fps(scene):.3f} fps "
+                    f"(source {clip.fps:.3f})"
+                ),
+                icon='CHECKMARK' if fps_ok else 'ERROR',
             )
 
         layout.separator()
