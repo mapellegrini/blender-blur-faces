@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Face Blur Workflow",
     "author": "OpenAI",
-    "version": (0, 3, 3),
+    "version": (0, 3, 4),
     "blender": (5, 2, 0),
     "location": "Movie Clip Editor > Sidebar > Face Blur",
     "description": "Reusable face-blur workflow with optional tracking and source-audio preservation and source frame-rate matching for Blender 5.2",
@@ -363,35 +363,39 @@ def _set_default_output(scene, clip):
 
 
 def _fps_ratio_from_clip_fps(fps_value):
-    """Return a Blender-friendly (fps, fps_base) pair for a clip fps.
+    """Return Blender's (fps, fps_base) representation for a clip frame rate.
 
-    Uses exact NTSC-style ratios for common fractional rates, otherwise falls
-    back to a millisecond precision rational.
+    Blender's effective frame rate is render.fps / render.fps_base.  The
+    render.fps integer is capped, so NTSC rates must be represented as
+    60 / 1.001, 30 / 1.001, etc. rather than 60000 / 1001.
     """
     fps_value = float(fps_value)
     if fps_value <= 0:
         raise RuntimeError("Clip frame rate is not available")
 
+    # Common exact/NTSC-style rates.
     common = [
-        (23.976023976, 24000, 1001),
-        (29.97002997, 30000, 1001),
-        (59.94005994, 60000, 1001),
-        (119.88011988, 120000, 1001),
-        (24.0, 24, 1),
-        (25.0, 25, 1),
-        (30.0, 30, 1),
-        (48.0, 48, 1),
-        (50.0, 50, 1),
-        (60.0, 60, 1),
-        (120.0, 120, 1),
+        (23.976023976, 24, 1.001),
+        (29.970029970, 30, 1.001),
+        (59.940059940, 60, 1.001),
+        (119.880119880, 120, 1.001),
+        (24.0, 24, 1.0),
+        (25.0, 25, 1.0),
+        (30.0, 30, 1.0),
+        (48.0, 48, 1.0),
+        (50.0, 50, 1.0),
+        (60.0, 60, 1.0),
+        (120.0, 120, 1.0),
     ]
     for target, fps, fps_base in common:
         if abs(fps_value - target) < 0.01:
             return fps, fps_base
 
-    fps = max(1, int(round(fps_value * 1000.0)))
-    fps_base = 1000
-    return fps, fps_base
+    # Generic fallback: keep fps as a normal-sized integer and encode the
+    # fractional part in fps_base. This avoids Blender clamping render.fps.
+    nominal = max(1, int(round(fps_value)))
+    fps_base = nominal / fps_value
+    return nominal, fps_base
 
 
 def _scene_effective_fps(scene):
@@ -1425,6 +1429,11 @@ class FACEBLUR_PT_panel(bpy.types.Panel):
                 ),
                 icon='CHECKMARK' if fps_ok else 'ERROR',
             )
+            if not fps_ok:
+                layout.label(
+                    text="Click Match Geometry to correct frame rate",
+                    icon='ERROR',
+                )
 
         layout.separator()
         layout.operator("face_blur.render_animation", icon='RENDER_ANIMATION')
